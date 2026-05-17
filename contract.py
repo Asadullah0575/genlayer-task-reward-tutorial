@@ -2,23 +2,19 @@
 Replace `YOUR-USERNAME` with your actual GitHub name
 
 
-# 🧾 2. `contract.py` (Backend logic)
-
-Paste this:
-
-```python
 class TaskContract:
     def __init__(self):
         self.tasks = []
 
     def create_task(self, creator, description, reward):
-        self.tasks.append({
+        task = {
             "creator": creator,
             "description": description,
             "reward": reward,
             "completed": False,
             "worker": None
-        })
+        }
+        self.tasks.append(task)
         return "Task created"
 
     def complete_task(self, task_id, worker):
@@ -30,4 +26,5 @@ class TaskContract:
         task = self.tasks[task_id]
         if task["completed"]:
             return f"Reward sent to {task['worker']}"
+        return "Task not completed yet"
         return "Task not completed yet"
