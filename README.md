@@ -6,8 +6,8 @@ a reward accordingly.
 
 - **Contract:** `contract.py`, using `gl.eq_principle.prompt_comparative`
 - **Network:** Studionet, chain ID `61999`
-- **Deployed at:** `0x81bc7194d6a9eDd20617440764516C93E0692135`
-- **Deployment tx:** `0x9883e58d20b5d7af398eeee05480f2e9db6cbfc1d017f3cb9a16ee648062dd9b`
+- **Deployed at:** `0xcb907A84f7Fd55BCb0D23101D1d34870759DE865`
+- **Deployment tx:** `0xebf4e835968e7d82fe3aebccd073aba08a30f309c9e9f839040b3f67a4d611ea`
 - **Status:** a full cycle has been run against this exact deployment and
   read back successfully: create_task, claim_task (from a second account),
   submit_evidence, verify_and_reward. The result below is real output from
@@ -230,13 +230,13 @@ This is the actual return value of `get_task` after running the full cycle
 against the deployment above:
 
 ```
-genlayer call 0x81bc7194d6a9eDd20617440764516C93E0692135 get_task --args 0
+genlayer call 0xcb907A84f7Fd55BCb0D23101D1d34870759DE865 get_task --args 0
 ```
 ```
 {
-  analysis: 'The evidence provides a correct Python function that sorts a
-    list of numbers in ascending order using the built-in sorted()
-    function, which fully satisfies the task requirements.',
+  analysis: 'The function `sort_list(arr)` returns `sorted(arr)`, which
+    correctly sorts a list of numbers in ascending order, fully satisfying
+    the completion criteria.',
   creator: '0x581a09d1eac64bb9f7aef59c9c69d5c9d069024f',
   criteria: 'The function must sort a list of numbers in ascending order.',
   description: 'Sort list',
@@ -249,6 +249,11 @@ genlayer call 0x81bc7194d6a9eDd20617440764516C93E0692135 get_task --args 0
   worker: '0x376b3c6258aba1ecb582e7a7f39919babab6b0e5'
 }
 ```
+
+`get_points` against the worker's address now returns `100` (the full
+reward, since tier 5 out of a max tier of 5 pays out `100 * 5 // 5`), with
+no error. This confirms the `get_points` fix below actually works, not just
+that it compiles.
 
 The `verify_and_reward` transaction that produced this reached
 `MAJORITY_AGREE`, with 3 of 5 validators independently fetching the gist
