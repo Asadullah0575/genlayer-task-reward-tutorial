@@ -3,31 +3,11 @@ from genlayer import *
 from dataclasses import dataclass
 import json
 
-# TaskReward: a GenLayer Intelligent Contract.
-#
-# A task creator posts a task with plain-English completion criteria.
-# A worker claims it and submits a public evidence URL.
-# The contract fetches that URL on-chain and uses the Equivalence Principle
-# (gl.eq_principle.prompt_comparative) so every validator independently
-# re-fetches and re-judges the same evidence, then compares its tier against
-# the leader's under an explicit exact-match rule. Reward points are derived
-# deterministically from the tier every validator reproduced identically.
-#
-# Design notes (each one came from a real failed deployment):
-# - Storage is TreeMap plus plain dataclass construction, the same pattern as
-#   the working bounty_board.py, not DynArray plus gl.storage.inmem_allocate.
-# - The source is ASCII only, and no code runs at import time beyond simple
-#   literals, to stay as close as possible to a contract known to load.
-# - prompt_comparative is used because this contract performs a live web
-#   fetch inside the judged callback. prompt_non_comparative examples only
-#   judge data already sitting in storage.
 
-# Tier scale: the evaluator returns an integer tier 0-5 directly. Validators
-# must agree on the tier exactly, and both the verdict and the payout are
-# computed from that single tier, never from a raw score with a tolerance.
 APPROVE_TIER = 3
 MAX_TIER = 5
 MAX_EVIDENCE_CHARS = 8000
+
 
 STATUS_OPEN = "open"
 STATUS_CLAIMED = "claimed"
@@ -51,15 +31,27 @@ class Task:
 
 
 class TaskReward(gl.Contract):
+    admin: Address
     tasks: TreeMap[u256, Task]
     task_count: u256
     points: TreeMap[Address, u256]
+    issuer_budgets: TreeMap[Address, u256]
 
     def __init__(self):
+        self.admin = gl.message.sender_address
         self.tasks = TreeMap()
         self.task_count = 0
 
-    # Deterministic bookkeeping. None of this needs an LLM.
+
+    @gl.public.write
+    def grant_budget(self, issuer: Address, amount: int):
+        if gl.message.sender_address != self.admin:
+            raise ValueError("only admin may grant budget")
+        if amount <= 0:
+            raise ValueError("amount must be positive")
+        current = int(self.issuer_budgets.get(issuer, u256(0)))
+        self.issuer_budgets[issuer] = u256(current + amount)
+
 
     @gl.public.write
     def create_task(self, description: str, criteria: str, reward: int) -> u256:
@@ -68,9 +60,18 @@ class TaskReward(gl.Contract):
         if not criteria.strip():
             raise ValueError("criteria must not be empty")
 
+        creator = gl.message.sender_address
+        available = int(self.issuer_budgets.get(creator, u256(0)))
+        if available < reward:
+            raise ValueError(
+                "insufficient issuer budget: call grant_budget first"
+            )
+
+        self.issuer_budgets[creator] = u256(available - reward)
+
         task_id = self.task_count
         new_task = Task(
-            creator=gl.message.sender_address,
+            creator=creator,
             worker=Address("0x0000000000000000000000000000000000000000"),
             description=description,
             criteria=criteria,
@@ -110,7 +111,6 @@ class TaskReward(gl.Contract):
         task.status = STATUS_SUBMITTED
         self.tasks[task_id] = task
 
-    # The non-deterministic core.
 
     @gl.public.write
     def verify_and_reward(self, task_id: u256):
@@ -118,8 +118,6 @@ class TaskReward(gl.Contract):
         if task.status != STATUS_SUBMITTED:
             raise ValueError("task is not awaiting verification")
 
-        # Copy to locals: the closure below runs inside the non-deterministic
-        # block and must not touch contract storage directly.
         url = task.evidence_url
         description = task.description
         criteria = task.criteria
@@ -156,10 +154,6 @@ Respond with ONLY this JSON object and nothing else. No markdown, no prose:
 
             return gl.nondet.exec_prompt(prompt).strip()
 
-        # Each validator independently re-fetches the URL and re-runs the same
-        # prompt, then compares its own result against the leader's using the
-        # rule below. The rule requires the tier, which drives the payout, to
-        # match exactly.
         raw = gl.eq_principle.prompt_comparative(
             fetch_and_evaluate,
             "The `tier` integer field in the JSON must match exactly between "
@@ -192,7 +186,14 @@ Respond with ONLY this JSON object and nothing else. No markdown, no prose:
             earned = (int(reward) * tier) // MAX_TIER
             self.points[worker] = u256(int(self.points.get(worker, u256(0))) + earned)
 
-    # Views.
+            leftover = int(reward) - earned
+            if leftover > 0:
+                current = int(self.issuer_budgets.get(task.creator, u256(0)))
+                self.issuer_budgets[task.creator] = u256(current + leftover)
+        else:
+            current = int(self.issuer_budgets.get(task.creator, u256(0)))
+            self.issuer_budgets[task.creator] = u256(current + int(reward))
+
 
     @gl.public.view
     def get_task(self, task_id: u256) -> Task:
@@ -201,6 +202,10 @@ Respond with ONLY this JSON object and nothing else. No markdown, no prose:
     @gl.public.view
     def get_points(self, address: Address) -> int:
         return int(self.points.get(address, u256(0)))
+
+    @gl.public.view
+    def get_budget(self, address: Address) -> int:
+        return int(self.issuer_budgets.get(address, u256(0)))
 
     @gl.public.view
     def get_task_count(self) -> u256:

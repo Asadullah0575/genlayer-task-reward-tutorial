@@ -6,12 +6,12 @@ a reward accordingly.
 
 - **Contract:** `contract.py`, using `gl.eq_principle.prompt_comparative`
 - **Network:** Studionet, chain ID `61999`
-- **Deployed at:** `0x81bc7194d6a9eDd20617440764516C93E0692135`
-- **Deployment tx:** `0x9883e58d20b5d7af398eeee05480f2e9db6cbfc1d017f3cb9a16ee648062dd9b`
-- **Status:** a full cycle has been run against this exact deployment and
-  read back successfully: create_task, claim_task (from a second account),
-  submit_evidence, verify_and_reward. The result below is real output from
-  that run, not a mock.
+- **Deployed at:** `0x8AB06fCC89db82817eDd502F2e5C798b60E3bfC8`
+- **Deployment tx:** `0x1654ddada80c5441d35bb2831ff599be1d39045000d95ac17c24bbba0901d418`
+- **Status:** the full cycle, including the issuance invariant from Round 6,
+  has been run against this exact deployment and read back. The values
+  below are real output from that run. Earlier deployments came from older
+  code and are not used as evidence.
 
 ## What you'll learn
 
@@ -226,17 +226,28 @@ read back afterward, for the reasons explained above.
 
 ## Real run, real output
 
-This is the actual return value of `get_task` after running the full cycle
-against the deployment above:
+All of this was run against `0x8AB06fCC89db82817eDd502F2e5C798b60E3bfC8`,
+the deployment above, in this order.
+
+1. The deployer is the admin. It grants itself a budget, then reads it back:
 
 ```
-genlayer call 0x81bc7194d6a9eDd20617440764516C93E0692135 get_task --args 0
+genlayer write 0x8AB0...bfC8 grant_budget --args 0x581a09d1eac64bb9f7aef59c9c69d5c9d069024f 1000
+genlayer call 0x8AB0...bfC8 get_budget --args 0x581a09d1eac64bb9f7aef59c9c69d5c9d069024f
+1000
 ```
+
+2. `create_task` was run twice with a reward of 100. Each call escrows 100
+   out of the budget, so the budget reads `800` and the task count reads `2`.
+
+3. Task 0 was claimed from a second account, given evidence, and verified.
+   `get_task` on task 0 afterward:
+
 ```
 {
-  analysis: 'The evidence provides a correct Python function that sorts a
-    list of numbers in ascending order using the built-in sorted()
-    function, which fully satisfies the task requirements.',
+  analysis: 'The provided function correctly sorts a list of numbers in
+    ascending order using the standard `sorted` function, which fully
+    satisfies the task criteria.',
   creator: '0x581a09d1eac64bb9f7aef59c9c69d5c9d069024f',
   criteria: 'The function must sort a list of numbers in ascending order.',
   description: 'Sort list',
@@ -250,10 +261,17 @@ genlayer call 0x81bc7194d6a9eDd20617440764516C93E0692135 get_task --args 0
 }
 ```
 
-The `verify_and_reward` transaction that produced this reached
-`MAJORITY_AGREE`, with 3 of 5 validators independently fetching the gist
-above, running the same prompt, and landing on the identical tier. Tx hash:
-`0xa246c0fcce82c974c21975ef1ef4708ff25d8a57df20e39a41a3c0f1432184cb`.
+4. `get_points` on the worker returns `100`, which is `100 * 5 // 5` at tier 5.
+
+5. The books balance. Granted 1000 equals points paid (100) plus budget
+   still held (800) plus reward escrowed in the still-open task 1 (100).
+
+6. The self-mint path is closed. The worker account, which was never
+   granted a budget, tried `create_task` with a reward of 999999. Afterward
+   `get_task_count` still returned `2` and `get_budget` for the worker
+   returned `0`. The write transaction itself still reports success,
+   because every validator agrees the call raises the same error, so the
+   unchanged task count and budget are what prove it was rejected.
 
 **Round 5, a real bug found while exercising get_points.** Calling
 `get_points` on a real deployed worker address threw
@@ -265,6 +283,34 @@ argument, not a string, so the contract was wrapping an `Address` in
 Address` directly and dropping the redundant conversion. Found by actually
 calling the method with a real argument, not by reading the code.
 
+## Round 6: unbounded self-mint, found by a reviewer, not by testing
+
+The version deployed above worked end to end, but had a real exploit: any
+address could call create_task with an arbitrary reward, switch to a second
+address it also controlled, claim_task, submit trivially-satisfying
+evidence, and verify_and_reward would mint that reward straight into the
+points ledger. Nothing backed the numbers in points, it was purely
+additive, so the cumulative worker ledger was freely self-mintable by
+anyone willing to run both sides of the transaction.
+
+The fix is an admin-controlled issuance invariant, not a bigger tolerance
+check or a bigger number. The deployer becomes admin on construction.
+Before anyone can create_task, the admin must call
+grant_budget(issuer, amount) for that address. create_task immediately
+escrows the full reward out of the creator's budget, so a task can only
+ever be created for an amount the creator was explicitly pre-funded for.
+On rejection, the full escrowed amount returns to the creator's budget. On
+a partial-tier approval, the worker is paid their earned share and the
+unearned remainder returns to the creator's budget rather than vanishing
+or being paid in full.
+
+This holds an invariant that can be checked at any point in the contract's
+life: points paid out, plus budget still held by any address, plus reward
+currently escrowed in open, claimed, or submitted tasks, can never exceed
+the total ever granted by the admin through grant_budget. No credit exists
+in the system that the admin did not explicitly issue, and no address can
+create a task it has not been pre-funded for.
+
 ## Verification checklist (run in this order)
 
 1. Confirm the published file is the deployed file:
@@ -273,8 +319,16 @@ calling the method with a real argument, not by reading the code.
 2. `genlayer deploy --contract contract.py`
 3. `genlayer call <address> get_task_count` must print `0`. If it says
    "not found", the contract did not load. Do not use that address.
-4. Run one full cycle: `create_task`, `claim_task` (from a second account),
+4. As the deployer (the admin), grant a budget before anything else works:
+   `genlayer write <address> grant_budget --args <deployerAddress> 1000`
+5. Confirm it: `genlayer call <address> get_budget --args <deployerAddress>`
+   must print `1000`. create_task will fail with "insufficient issuer
+   budget" until this step is done.
+6. Run one full cycle: `create_task`, `claim_task` (from a second account),
    `submit_evidence`, `verify_and_reward`, then `get_task` and record the
    `tier` and `analysis`.
-5. Put the address in the "Deployed at" line above and use the matching
+7. Check `get_points` on the worker and `get_budget` on the creator. Their
+   sum, plus the reward of any task still open or in flight, should equal
+   the amount granted in step 4, confirming the invariant holds.
+8. Put the address in the "Deployed at" line above and use the matching
    Explorer link in the submission.
